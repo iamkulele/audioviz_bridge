@@ -1,0 +1,48 @@
+# audioviz-bridge mappings
+# 基准配置。本地覆盖请复制到 mappings.local.yaml，不要直接改这个文件。
+# VJ 改这个文件不用重启进程，库会自动热加载。
+
+signals:
+  # 底鼓脉冲：只有检测到低频 onset 时才触发
+  - name: kick_pulse
+    source: onset
+    osc_address: /visual/kick
+    trigger_on: onset
+    gate_source: bass
+    gate_threshold: 0.15
+    confidence_threshold: 0.4
+    range: [0.0, 1.0]
+    min_interval: 0.05
+
+  # 每拍脉冲：来自 Ableton Link（或内部时钟 fallback）
+  - name: beat_pulse
+    source: beat
+    osc_address: /visual/beat
+    trigger_on: beat
+    range: [0.0, 1.0]
+
+  # 低频能量连续值：驱动画面尺寸/冲击
+  - name: bass_level
+    source: bass
+    osc_address: /visual/bass
+    range: [0.0, 1.0]
+
+  # 中频能量：驱动色彩偏移
+  - name: mid_level
+    source: mid
+    osc_address: /visual/mid
+    range: [0.0, 1.0]
+
+  # 高频能量：驱动粒子/细节
+  - name: treble_level
+    source: treble
+    osc_address: /visual/treble
+    range: [0.0, 1.0]
+
+  # MIDI CC 输出示例：把 bass 能量发到 CC 1
+  - name: bass_cc
+    source: bass
+    osc_address: ""
+    midi_cc: 1
+    midi_channel: 0
+    range: [0.0, 1.0]

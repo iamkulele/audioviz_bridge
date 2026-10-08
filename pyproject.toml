@@ -1,0 +1,31 @@
+[project]
+name = "audioviz-bridge"
+version = "0.1.0"
+description = "Lightweight audio-to-OSC/MIDI bridge for live VJ systems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    "python-osc>=1.8.3",
+    "mido>=1.3.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+link = ["aalink>=0.1.5"]
+
+[dependency-groups]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+audioviz-bridge = "audioviz_bridge.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
