@@ -1,7 +1,8 @@
 """Synthetic audio source for testing without hardware.
 
-Generates a kick drum + bass + hi-hat + melody pattern at a fixed BPM,
-feeds each block through the same AudioAnalyzer pipeline used in production.
+Generates a kick drum + bass + hi-hat + melody pattern at a fixed BPM and
+hands raw audio blocks to the callback. Analysis happens downstream on the
+engine's worker thread, so this matches the device path exactly.
 Interface matches AudioAnalyzer: start(callback) / stop().
 """
 
@@ -12,14 +13,13 @@ import time
 
 import numpy as np
 
-from .analyzer import AudioAnalyzer, AnalysisFrame
+from .analyzer import AudioAnalyzer
 
 
 class SyntheticSource:
     """Replaces AudioAnalyzer's device input with generated audio."""
 
     def __init__(self, analyzer: AudioAnalyzer, bpm: float = 120.0) -> None:
-        self.analyzer = analyzer
         self.bpm = bpm
         self.sample_rate = analyzer.sample_rate
         self.block_size = analyzer.block_size
@@ -59,8 +59,7 @@ class SyntheticSource:
         next_time = time.monotonic()
         while not self._stop.is_set():
             block = self._generate_block()
-            frame = self.analyzer.process_block(block)
-            callback(frame)
+            callback(block)
             next_time += interval
             sleep = next_time - time.monotonic()
             if sleep > 0:

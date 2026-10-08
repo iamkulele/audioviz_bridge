@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from typing import Optional
 
-from .analyzer import AnalysisFrame, AudioAnalyzer
+from .analyzer import AudioAnalyzer
 from .link_sync import LinkClock
-from .mapper import MappingConfig, SignalMapper, SignalRoute
+from .mapper import MappingConfig, SignalMapper
 from .output import MultiOutput, NullOutput, OutputBackend
 
 
@@ -60,13 +61,13 @@ class BridgeEngine:
         self._emitted = 0
         self._lock = threading.Lock()
 
-        # Single-slot mailbox: the audio callback drops the latest batch of
-        # outgoing messages here, and the sender thread ships them. Overwriting
-        # the slot means "latest wins" — stale messages are dropped instead of
-        # queued, so worst-case latency stays at one frame rather than growing
-        # into a backlog.
-        self._cond = threading.Condition()
-        self._batch: list[tuple[SignalRoute, float]] = []
+        # Raw-audio handoff: the audio callback only copies its block into this
+        # bounded buffer and returns. A single worker thread drains it and does
+        # analysis + mapping + I/O, so the real-time callback never does FFT,
+        # heap allocation, or a network syscall. Dropping the oldest block when
+        # the worker falls behind is correct: stale audio beats added latency.
+        self._audio_cond = threading.Condition()
+        self._audio_buffer: deque = deque(maxlen=4)
         self._stopping = False
         self._worker: threading.Thread | None = None
 
@@ -81,7 +82,30 @@ class BridgeEngine:
                 "tempo": self.link.state.tempo,
             }
 
-    def _on_frame(self, frame: AnalysisFrame) -> None:
+    def _on_audio(self, block) -> None:
+        """Publish a raw audio block; runs on the audio callback thread.
+
+        Bounded work only: append + notify. The caller (device callback) has
+        already copied the block out of the sound card's buffer.
+        """
+        with self._audio_cond:
+            self._audio_buffer.append(block)  # maxlen drops the oldest
+            self._audio_cond.notify()
+
+    def _run(self) -> None:
+        """Worker: drain raw audio, analyze, map, and emit."""
+        while True:
+            with self._audio_cond:
+                while not self._audio_buffer and not self._stopping:
+                    self._audio_cond.wait()
+                if self._stopping and not self._audio_buffer:
+                    return
+                block = self._audio_buffer.popleft()
+            self._process_block(block)
+
+    def _process_block(self, block) -> None:
+        frame = self.analyzer.process_block(block)
+
         now = time.monotonic()
         with self._lock:
             self._frames += 1
@@ -96,15 +120,10 @@ class BridgeEngine:
         if silenced:
             return
 
-        # Evaluate in the callback (cheap); ship the actual I/O to the sender thread.
         batch = list(self.mapper.evaluate(frame))
         if not batch:
             return
-        with self._cond:
-            self._batch = batch  # latest wins
-            self._cond.notify()
 
-    def _send_batch(self, batch: list[tuple[SignalRoute, float]]) -> None:
         for route, value in batch:
             try:
                 if route.osc_address:
@@ -113,38 +132,27 @@ class BridgeEngine:
                     self.output.send_midi_cc(route.midi_channel, route.midi_cc, value)
             except Exception:
                 pass
+
         with self._lock:
             self._emitted += len(batch)
 
-    def _send_loop(self) -> None:
-        """Wait for the latest batch and emit it; runs in the sender thread."""
-        while True:
-            with self._cond:
-                while not self._batch and not self._stopping:
-                    self._cond.wait()
-                if self._stopping and not self._batch:
-                    return
-                batch, self._batch = self._batch, []
-            self._send_batch(batch)
-
     def start(self) -> None:
         self.config.start_watching()
-        with self._cond:
+        with self._audio_cond:
             self._stopping = False
-            self._batch = []
         self._worker = threading.Thread(
-            target=self._send_loop, daemon=True, name="audioviz-sender"
+            target=self._run, daemon=True, name="audioviz-worker"
         )
         self._worker.start()
-        self.source.start(self._on_frame)
+        self.source.start(self._on_audio)
 
     def stop(self) -> None:
         self.source.stop()
         self.config.stop_watching()
-        # Stop producers first, then let the sender drain the last batch and exit.
-        with self._cond:
+        # Stop producers first, then let the worker drain the last block and exit.
+        with self._audio_cond:
             self._stopping = True
-            self._cond.notify()
+            self._audio_cond.notify()
         if self._worker is not None:
             self._worker.join(timeout=2.0)
             self._worker = None

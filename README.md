@@ -183,7 +183,6 @@ uv run audioviz-bridge --help
 | 参数 | 说明 |
 | --- |  --- |
 | `--config, -c` | mappings.yaml 路径（必填） |
-| --- |  --- |
 | `--osc` | OSC 目标，格式 `IP:端口`，默认端口 7000 |
 | `--midi` | 启用 MIDI CC 输出 |
 | `--midi-port` | 虚拟 MIDI 端口名，默认 `audioviz-bridge` |

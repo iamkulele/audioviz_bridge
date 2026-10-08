@@ -7,7 +7,7 @@ import time
 from audioviz_bridge.engine import BridgeEngine
 from audioviz_bridge.output import NullOutput
 
-from .helpers import RecordingBackend, write_config
+from .helpers import RecordingBackend, silent_block, sine_block, write_config
 
 
 def _make_engine(tmp_path, output, **kwargs):
@@ -83,49 +83,46 @@ def test_engine_stats_shape(tmp_path):
 
 
 def test_engine_silence_valve_stops_then_resumes(tmp_path, monkeypatch):
-    """3 秒静音后不再写入槽位，真实音频回来时恢复。"""
-    from audioviz_bridge.analyzer import AnalysisFrame
-
-    engine = _make_engine(tmp_path, RecordingBackend())
+    """3 秒静音后停止发送，真实音频回来时恢复。"""
+    rec = RecordingBackend()
+    engine = _make_engine(tmp_path, rec)
 
     clock = {"t": 0.0}
     monkeypatch.setattr("audioviz_bridge.engine.time.monotonic", lambda: clock["t"])
 
-    loud1 = AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.5)
-    silent = AnalysisFrame(timestamp=0.0, rms=0.0, bass_energy=0.0)
-    loud2 = AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.9)
+    engine._process_block(sine_block(100.0))  # 有能量 -> 发送
+    assert [a for a, _ in rec.osc] == ["/bass"]
 
-    engine._on_frame(loud1)
-    assert engine._batch[0][1] == 0.5
+    # 静音:先喂静音块让平滑衰减到阈值以下，再把时钟拨过 3 秒超时
+    for _ in range(20):
+        clock["t"] += 0.1
+        engine._process_block(silent_block())
+    clock["t"] += 10.0
 
-    # 静音超过 3 秒 -> 不覆盖槽位（保留上一帧值，而非被 0 覆盖）
-    clock["t"] = 10.0
-    engine._on_frame(silent)
-    assert engine._batch[0][1] == 0.5
+    rec.osc.clear()
+    engine._process_block(silent_block())  # 已静音超过 3 秒 -> 不再发送
+    assert rec.osc == []
 
-    # 音频恢复 -> 槽位重新被更新
-    engine._on_frame(loud2)
-    assert engine._batch[0][1] == 0.9
+    engine._process_block(sine_block(100.0))  # 音频恢复 -> 重新发送
+    assert len(rec.osc) > 0
 
 
-def test_engine_sender_thread_ships_batch(tmp_path):
-    """sender 线程消费槽位，把消息发到后端（不依赖模拟源的时序）。"""
+def test_engine_worker_processes_audio_blocks(tmp_path):
+    """worker 消费原始音频块，分析并发送（不依赖模拟源的时序）。"""
     import threading
-
-    from audioviz_bridge.analyzer import AnalysisFrame
 
     rec = RecordingBackend()
     engine = _make_engine(tmp_path, rec)
 
-    worker = threading.Thread(target=engine._send_loop, daemon=True)
+    worker = threading.Thread(target=engine._run, daemon=True)
     worker.start()
 
-    engine._on_frame(AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.5))
+    engine._on_audio(sine_block(100.0))
 
-    # 停掉 sender，让它把最后一个 batch 发完再退出
-    with engine._cond:
+    # 停掉 worker，让它把最后一个块处理完再退出
+    with engine._audio_cond:
         engine._stopping = True
-        engine._cond.notify()
+        engine._audio_cond.notify()
     worker.join(timeout=1.0)
 
     assert [addr for addr, _ in rec.osc] == ["/bass"]

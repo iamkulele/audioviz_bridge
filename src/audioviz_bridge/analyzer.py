@@ -167,7 +167,13 @@ class AudioAnalyzer:
         return self._smoothed
 
     def start(self, callback) -> None:
-        """Start capturing audio; callback receives each AnalysisFrame."""
+        """Start capturing audio; callback receives each raw audio block.
+
+        Analysis is intentionally NOT done here: this runs on PortAudio's
+        real-time thread, which must return within one block period. The block
+        is copied out and handed off; the consumer runs process_block() on its
+        own thread.
+        """
         if self._running:
             return
 
@@ -175,8 +181,7 @@ class AudioAnalyzer:
             del frames, time_info
             if status:
                 pass  # status is informational; bridge stays silent
-            frame = self.process_block(indata.copy())
-            callback(frame)
+            callback(indata.copy())
 
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
