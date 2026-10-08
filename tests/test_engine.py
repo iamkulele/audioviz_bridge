@@ -83,7 +83,7 @@ def test_engine_stats_shape(tmp_path):
 
 
 def test_engine_silence_valve_stops_then_resumes(tmp_path, monkeypatch):
-    """3 秒静音后停止入队，真实音频回来时恢复。"""
+    """3 秒静音后不再写入槽位，真实音频回来时恢复。"""
     from audioviz_bridge.analyzer import AnalysisFrame
 
     engine = _make_engine(tmp_path, RecordingBackend())
@@ -91,24 +91,25 @@ def test_engine_silence_valve_stops_then_resumes(tmp_path, monkeypatch):
     clock = {"t": 0.0}
     monkeypatch.setattr("audioviz_bridge.engine.time.monotonic", lambda: clock["t"])
 
-    loud = AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.5)
+    loud1 = AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.5)
     silent = AnalysisFrame(timestamp=0.0, rms=0.0, bass_energy=0.0)
+    loud2 = AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.9)
 
-    engine._on_frame(loud)
-    assert engine._queue.qsize() == 1
+    engine._on_frame(loud1)
+    assert engine._batch[0][1] == 0.5
 
-    # 静音超过 3 秒 -> 不再入队
+    # 静音超过 3 秒 -> 不覆盖槽位（保留上一帧值，而非被 0 覆盖）
     clock["t"] = 10.0
     engine._on_frame(silent)
-    assert engine._queue.qsize() == 1
+    assert engine._batch[0][1] == 0.5
 
-    # 音频恢复 -> 恢复入队
-    engine._on_frame(loud)
-    assert engine._queue.qsize() == 2
+    # 音频恢复 -> 槽位重新被更新
+    engine._on_frame(loud2)
+    assert engine._batch[0][1] == 0.9
 
 
-def test_engine_sender_thread_drains_queue(tmp_path):
-    """sender 线程消费队列，把消息发到后端（不依赖模拟源的时序）。"""
+def test_engine_sender_thread_ships_batch(tmp_path):
+    """sender 线程消费槽位，把消息发到后端（不依赖模拟源的时序）。"""
     import threading
 
     from audioviz_bridge.analyzer import AnalysisFrame
@@ -120,7 +121,11 @@ def test_engine_sender_thread_drains_queue(tmp_path):
     worker.start()
 
     engine._on_frame(AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.5))
-    engine._queue.put(None)  # 哨兵：让 worker 处理完这条后退出
+
+    # 停掉 sender，让它把最后一个 batch 发完再退出
+    with engine._cond:
+        engine._stopping = True
+        engine._cond.notify()
     worker.join(timeout=1.0)
 
     assert [addr for addr, _ in rec.osc] == ["/bass"]

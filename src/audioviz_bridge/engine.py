@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import queue
 import threading
 import time
 from typing import Optional
@@ -61,11 +60,14 @@ class BridgeEngine:
         self._emitted = 0
         self._lock = threading.Lock()
 
-        # Outgoing messages are handed to a dedicated sender thread so the
-        # audio callback never does network I/O (UDP send) in its own thread.
-        self._queue: queue.Queue[tuple[SignalRoute, float] | None] = queue.Queue(
-            maxsize=64
-        )
+        # Single-slot mailbox: the audio callback drops the latest batch of
+        # outgoing messages here, and the sender thread ships them. Overwriting
+        # the slot means "latest wins" — stale messages are dropped instead of
+        # queued, so worst-case latency stays at one frame rather than growing
+        # into a backlog.
+        self._cond = threading.Condition()
+        self._batch: list[tuple[SignalRoute, float]] = []
+        self._stopping = False
         self._worker: threading.Thread | None = None
 
     @property
@@ -95,32 +97,15 @@ class BridgeEngine:
             return
 
         # Evaluate in the callback (cheap); ship the actual I/O to the sender thread.
-        for route, value in self.mapper.evaluate(frame):
-            self._enqueue(route, value)
+        batch = list(self.mapper.evaluate(frame))
+        if not batch:
+            return
+        with self._cond:
+            self._batch = batch  # latest wins
+            self._cond.notify()
 
-    def _enqueue(self, route: SignalRoute, value: float) -> None:
-        try:
-            self._queue.put_nowait((route, value))
-        except queue.Full:
-            # Backpressure: the backend can't keep up. Drop the oldest queued
-            # message so we emit the freshest value instead of blocking the
-            # audio callback or growing the queue without bound.
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._queue.put_nowait((route, value))
-            except queue.Full:
-                pass
-
-    def _send_loop(self) -> None:
-        """Drain the queue and emit messages; runs in the sender thread."""
-        while True:
-            item = self._queue.get()
-            if item is None:  # shutdown sentinel
-                break
-            route, value = item
+    def _send_batch(self, batch: list[tuple[SignalRoute, float]]) -> None:
+        for route, value in batch:
             try:
                 if route.osc_address:
                     self.output.send_osc(route.osc_address, value)
@@ -128,11 +113,25 @@ class BridgeEngine:
                     self.output.send_midi_cc(route.midi_channel, route.midi_cc, value)
             except Exception:
                 pass
-            with self._lock:
-                self._emitted += 1
+        with self._lock:
+            self._emitted += len(batch)
+
+    def _send_loop(self) -> None:
+        """Wait for the latest batch and emit it; runs in the sender thread."""
+        while True:
+            with self._cond:
+                while not self._batch and not self._stopping:
+                    self._cond.wait()
+                if self._stopping and not self._batch:
+                    return
+                batch, self._batch = self._batch, []
+            self._send_batch(batch)
 
     def start(self) -> None:
         self.config.start_watching()
+        with self._cond:
+            self._stopping = False
+            self._batch = []
         self._worker = threading.Thread(
             target=self._send_loop, daemon=True, name="audioviz-sender"
         )
@@ -142,8 +141,10 @@ class BridgeEngine:
     def stop(self) -> None:
         self.source.stop()
         self.config.stop_watching()
-        # Stop producers first, then signal the worker to drain and exit, then close.
-        self._queue.put(None)
+        # Stop producers first, then let the sender drain the last batch and exit.
+        with self._cond:
+            self._stopping = True
+            self._cond.notify()
         if self._worker is not None:
             self._worker.join(timeout=2.0)
             self._worker = None
