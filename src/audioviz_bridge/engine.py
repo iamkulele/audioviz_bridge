@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from typing import Optional
 
 from .analyzer import AnalysisFrame, AudioAnalyzer
 from .link_sync import LinkClock
-from .mapper import MappingConfig, SignalMapper
+from .mapper import MappingConfig, SignalMapper, SignalRoute
 from .output import MultiOutput, NullOutput, OutputBackend
 
 
@@ -21,6 +22,7 @@ class BridgeEngine:
     """
 
     SILENCE_TIMEOUT = 3.0  # seconds without audio -> stop emitting
+    SILENCE_RMS = 0.005    # normalized RMS below which a frame counts as silent
 
     def __init__(
         self,
@@ -54,11 +56,17 @@ class BridgeEngine:
         else:
             self.source = self.analyzer
 
-        self._last_audio = time.monotonic()
+        self._last_signal = time.monotonic()
         self._frames = 0
         self._emitted = 0
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+
+        # Outgoing messages are handed to a dedicated sender thread so the
+        # audio callback never does network I/O (UDP send) in its own thread.
+        self._queue: queue.Queue[tuple[SignalRoute, float] | None] = queue.Queue(
+            maxsize=64
+        )
+        self._worker: threading.Thread | None = None
 
     @property
     def stats(self) -> dict:
@@ -75,34 +83,69 @@ class BridgeEngine:
         now = time.monotonic()
         with self._lock:
             self._frames += 1
-            self._last_audio = now
+            # Gate on energy, not frame arrival: a muted mic or a disconnected
+            # interface keeps the stream alive while delivering silence, so
+            # "no audio" means "no energy", and we'd otherwise keep flooding
+            # downstream with near-zero values.
+            if frame.rms > self.SILENCE_RMS:
+                self._last_signal = now
+            silenced = (now - self._last_signal) > self.SILENCE_TIMEOUT
 
+        if silenced:
+            return
+
+        # Evaluate in the callback (cheap); ship the actual I/O to the sender thread.
         for route, value in self.mapper.evaluate(frame):
-            if route.osc_address:
-                self.output.send_osc(route.osc_address, value)
-            if route.midi_cc is not None:
-                self.output.send_midi_cc(route.midi_channel, route.midi_cc, value)
+            self._enqueue(route, value)
+
+    def _enqueue(self, route: SignalRoute, value: float) -> None:
+        try:
+            self._queue.put_nowait((route, value))
+        except queue.Full:
+            # Backpressure: the backend can't keep up. Drop the oldest queued
+            # message so we emit the freshest value instead of blocking the
+            # audio callback or growing the queue without bound.
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait((route, value))
+            except queue.Full:
+                pass
+
+    def _send_loop(self) -> None:
+        """Drain the queue and emit messages; runs in the sender thread."""
+        while True:
+            item = self._queue.get()
+            if item is None:  # shutdown sentinel
+                break
+            route, value = item
+            try:
+                if route.osc_address:
+                    self.output.send_osc(route.osc_address, value)
+                if route.midi_cc is not None:
+                    self.output.send_midi_cc(route.midi_channel, route.midi_cc, value)
+            except Exception:
+                pass
             with self._lock:
                 self._emitted += 1
 
-    def _watchdog(self) -> None:
-        """Stop emitting if audio has gone silent, but keep the process alive."""
-        while not self._stop.is_set():
-            with self._lock:
-                silent = (time.monotonic() - self._last_audio) > self.SILENCE_TIMEOUT
-            if silent:
-                # Do nothing; mapper already gates on live frames.
-                pass
-            self._stop.wait(0.5)
-
     def start(self) -> None:
         self.config.start_watching()
+        self._worker = threading.Thread(
+            target=self._send_loop, daemon=True, name="audioviz-sender"
+        )
+        self._worker.start()
         self.source.start(self._on_frame)
-        threading.Thread(target=self._watchdog, daemon=True).start()
 
     def stop(self) -> None:
-        self._stop.set()
-        self.source.stop() 
+        self.source.stop()
         self.config.stop_watching()
+        # Stop producers first, then signal the worker to drain and exit, then close.
+        self._queue.put(None)
+        if self._worker is not None:
+            self._worker.join(timeout=2.0)
+            self._worker = None
         self.link.disable()
         self.output.close()

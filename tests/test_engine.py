@@ -80,3 +80,47 @@ def test_engine_stats_shape(tmp_path):
     assert set(stats.keys()) >= {"frames", "emitted", "link_available", "link_enabled", "tempo"}
     assert isinstance(stats["frames"], int)
     assert isinstance(stats["link_available"], bool)
+
+
+def test_engine_silence_valve_stops_then_resumes(tmp_path, monkeypatch):
+    """3 秒静音后停止入队，真实音频回来时恢复。"""
+    from audioviz_bridge.analyzer import AnalysisFrame
+
+    engine = _make_engine(tmp_path, RecordingBackend())
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr("audioviz_bridge.engine.time.monotonic", lambda: clock["t"])
+
+    loud = AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.5)
+    silent = AnalysisFrame(timestamp=0.0, rms=0.0, bass_energy=0.0)
+
+    engine._on_frame(loud)
+    assert engine._queue.qsize() == 1
+
+    # 静音超过 3 秒 -> 不再入队
+    clock["t"] = 10.0
+    engine._on_frame(silent)
+    assert engine._queue.qsize() == 1
+
+    # 音频恢复 -> 恢复入队
+    engine._on_frame(loud)
+    assert engine._queue.qsize() == 2
+
+
+def test_engine_sender_thread_drains_queue(tmp_path):
+    """sender 线程消费队列，把消息发到后端（不依赖模拟源的时序）。"""
+    import threading
+
+    from audioviz_bridge.analyzer import AnalysisFrame
+
+    rec = RecordingBackend()
+    engine = _make_engine(tmp_path, rec)
+
+    worker = threading.Thread(target=engine._send_loop, daemon=True)
+    worker.start()
+
+    engine._on_frame(AnalysisFrame(timestamp=0.0, rms=0.5, bass_energy=0.5))
+    engine._queue.put(None)  # 哨兵：让 worker 处理完这条后退出
+    worker.join(timeout=1.0)
+
+    assert [addr for addr, _ in rec.osc] == ["/bass"]

@@ -4,6 +4,14 @@ from audioviz_bridge.analyzer import AudioAnalyzer
 from audioviz_bridge.mapper import MappingConfig, SignalMapper
 
 
+def test_package_exposes_public_api():
+    """顶层包应能直接导入公开 API(而非空的 __init__ / 孤儿 init.py)。"""
+    import audioviz_bridge
+
+    assert audioviz_bridge.__version__ == "0.1.0"
+    from audioviz_bridge import AudioAnalyzer, BridgeEngine, SignalMapper  # noqa: F401
+
+
 def test_analyzer_produces_normalized_frame():
     analyzer = AudioAnalyzer(sample_rate=48000, block_size=1024)
     sine = np.sin(2 * np.pi * 100 * np.arange(1024) / 48000).astype(np.float32)
