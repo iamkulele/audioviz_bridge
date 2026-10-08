@@ -247,14 +247,12 @@ uv run audioviz-bridge --help
 系统里没有可用的默认音频输入设备。先列出可用设备：
 
 ```bash
-uv run python -c "import sounddevice as sd; print(sd.query\_devices()); print('默认:', sd.default.device)"
+uv run python -c "import sounddevice as sd; print(sd.query_devices()); print('默认:', sd.default.device)"
 ```
 
 如果输出是 `[-1, -1]`，说明系统完全没识别到音频设备。三种情况：
 
 **A. 有硬件但音频服务没跑**
-
-bash
 
 ```bash
 # PipeWire
@@ -266,8 +264,6 @@ systemctl --user start pulseaudio
 **B. 服务器 / 容器 / WSL 没有声卡**
 用模拟源验证信号链：
 
-bash
-
 ```bash
 uv run audioviz-bridge -c mappings.yaml --osc 127.0.0.1:7000 \\
   --source simulate --stats
@@ -275,11 +271,9 @@ uv run audioviz-bridge -c mappings.yaml --osc 127.0.0.1:7000 \\
 
 或加载虚拟声卡（Linux）：
 
-bash
-
 ```bash
 sudo modprobe snd-aloop
-uv run python -c "import sounddevice as sd; print(sd.query\_devices())"
+uv run python -c "import sounddevice as sd; print(sd.query_devices())"
 ```
 
 **C. 有多个设备，需要指定**

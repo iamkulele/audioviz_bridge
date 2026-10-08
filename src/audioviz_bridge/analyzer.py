@@ -28,12 +28,20 @@ class AudioAnalyzer:
     """Captures audio from an input device and extracts features per block.
 
     Features are normalized to 0.0-1.0 where applicable, so downstream
-    mapping can use fixed thresholds regardless of input gain.
+    mapping can use fixed thresholds. The band-energy references below are
+    calibration points for a typical line-level input; they scale with source
+    gain, so retune them if the gain changes materially.
     """
 
     BASS_RANGE = (20.0, 250.0)
     MID_RANGE = (250.0, 2000.0)
     TREBLE_RANGE = (2000.0, 8000.0)
+
+    # References for _normalize: the band-energy magnitude that maps to ~63%
+    # (1 - 1/e) of full scale. Tuned for a line-level input; not gain-invariant.
+    BASS_REFERENCE = 0.05
+    MID_REFERENCE = 0.02
+    TREBLE_REFERENCE = 0.01
 
     def __init__(
         self,
@@ -93,7 +101,9 @@ class AudioAnalyzer:
             block = block.mean(axis=1)
         block = block.astype(np.float32)
 
-        if block.size < self.block_size:
+        if block.size > self.block_size:
+            block = block[: self.block_size]
+        elif block.size < self.block_size:
             block = np.pad(block, (0, self.block_size - block.size))
 
         windowed = block * self._window
@@ -134,9 +144,9 @@ class AudioAnalyzer:
         frame = AnalysisFrame(
             timestamp=time.monotonic(),
             rms=self._normalize(rms),
-            bass_energy=self._normalize(bass, reference=0.05),
-            mid_energy=self._normalize(mid, reference=0.02),
-            treble_energy=self._normalize(treble, reference=0.01),
+            bass_energy=self._normalize(bass, reference=self.BASS_REFERENCE),
+            mid_energy=self._normalize(mid, reference=self.MID_REFERENCE),
+            treble_energy=self._normalize(treble, reference=self.TREBLE_REFERENCE),
             onset_strength=onset_strength,
             onset_detected=onset_detected,
             spectral_flux=flux,

@@ -12,6 +12,14 @@ from .output import MIDIOutput, MultiOutput, OSCOutput
 
 
 def parse_target(value: str) -> tuple[str, int]:
+    """Parse a destination as ``host``, ``host:port``, or bracketed IPv6 ``[::1]:7000``."""
+    if value.startswith("["):  # bracketed IPv6, optional :port after ]
+        host, sep, rest = value[1:].partition("]")
+        if not sep:
+            raise ValueError(f"invalid OSC target: {value!r}")
+        return host, int(rest[1:]) if rest.startswith(":") else 7000
+    if value.count(":") > 1:  # unbracketed IPv6 without a port
+        return value, 7000
     if ":" not in value:
         return value, 7000
     host, port = value.rsplit(":", 1)

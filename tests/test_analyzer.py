@@ -55,6 +55,13 @@ def test_analyzer_pads_short_blocks():
     assert 0.0 <= frame.rms <= 1.0
 
 
+def test_analyzer_truncates_long_blocks():
+    analyzer = AudioAnalyzer(sample_rate=48000, block_size=1024)
+    long_block = np.ones(2048, dtype=np.float32) * 0.5
+    frame = analyzer.process_block(long_block)
+    assert 0.0 <= frame.rms <= 1.0
+
+
 def test_analyzer_onset_detection_on_sudden_burst():
     analyzer = AudioAnalyzer(sample_rate=48000, block_size=1024)
     # 建立静音历史

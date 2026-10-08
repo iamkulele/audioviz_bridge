@@ -38,6 +38,23 @@ signals:
     assert routes[1].confidence_threshold == 0.5
 
 
+def test_config_osc_address_is_optional(tmp_path):
+    path = write_config(
+        tmp_path,
+        """
+signals:
+  - name: midi_only
+    source: bass
+    midi_cc: 1
+""",
+    )
+    cfg = MappingConfig(path)
+    routes = cfg.load()
+    assert len(routes) == 1
+    assert routes[0].osc_address == ""
+    assert routes[0].midi_cc == 1
+
+
 def test_config_reload_callback(tmp_path):
     path = write_config(
         tmp_path,

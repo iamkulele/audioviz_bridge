@@ -12,6 +12,21 @@ def test_package_exposes_public_api():
     from audioviz_bridge import AudioAnalyzer, BridgeEngine, SignalMapper  # noqa: F401
 
 
+def test_parse_target_host_and_port():
+    from audioviz_bridge.__main__ import parse_target
+
+    assert parse_target("127.0.0.1") == ("127.0.0.1", 7000)
+    assert parse_target("127.0.0.1:9000") == ("127.0.0.1", 9000)
+
+
+def test_parse_target_ipv6():
+    from audioviz_bridge.__main__ import parse_target
+
+    assert parse_target("[::1]:7000") == ("::1", 7000)
+    assert parse_target("[::1]") == ("::1", 7000)
+    assert parse_target("::1") == ("::1", 7000)
+
+
 def test_analyzer_produces_normalized_frame():
     analyzer = AudioAnalyzer(sample_rate=48000, block_size=1024)
     sine = np.sin(2 * np.pi * 100 * np.arange(1024) / 48000).astype(np.float32)

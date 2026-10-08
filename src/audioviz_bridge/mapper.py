@@ -63,7 +63,7 @@ class MappingConfig:
                 SignalRoute(
                     name=item["name"],
                     source=item["source"],
-                    osc_address=item["osc_address"],
+                    osc_address=item.get("osc_address", ""),
                     range=(float(rng[0]), float(rng[1])),
                     trigger_on=item.get("trigger_on"),
                     confidence_threshold=float(item.get("confidence_threshold", 0.0)),
